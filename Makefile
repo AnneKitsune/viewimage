@@ -27,7 +27,7 @@ distclean: clean
 	rm -f $(OUT) config.h
 
 install: $(OUT)
-	cp $(OUT) $(bindir)
+	install -D $(OUT) $(bindir)
 	[ -d $(mandir)/man1 ] || mkdir -p $(mandir)/man1
 	gzip -9c $(OUT).1 > $(mandir)/man1/$(OUT).1.gz
 
