@@ -1,6 +1,6 @@
-#include "config.h"
-#include "fbv.h"
+#include "viewimage.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +8,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <stdio.h>
+#include <arpa/inet.h>
+
 #include <getopt.h>
 #include <termios.h>
 #include <signal.h>
@@ -17,7 +18,6 @@
 #define PAN_STEPPING 20
 
 static int opt_clear = 1;
-static int opt_alpha = 0;
 static int opt_hide_cursor = 1;
 static int opt_image_info = 1;
 static int opt_shrink = 0;
@@ -88,20 +88,16 @@ static inline void do_rotate(struct image *i, int rot)
 {
 	if(rot)
 	{
-		unsigned char *image, *alpha = NULL;
+		unsigned char *image = NULL;
 		int t;
 
 		image = rotate(i->rgb, i->width, i->height, rot);
-		if(i->alpha)
-			alpha = alpha_rotate(i->alpha, i->width, i->height, rot);
 		if(i->do_free)
 		{
-			free(i->alpha);
 			free(i->rgb);
 		}
 
 		i->rgb = image;
-		i->alpha = alpha;
 		i->do_free = 1;
 
 		if(rot & 1)
@@ -121,7 +117,7 @@ static inline void do_enlarge(struct image *i, int screen_width, int screen_heig
 	if((i->width < screen_width) || (i->height < screen_height))
 	{
 		int xsize = i->width, ysize = i->height;
-		unsigned char * image, * alpha = NULL;
+		unsigned char * image = NULL;
 
 		if(ignoreaspect)
 		{
@@ -161,17 +157,13 @@ static inline void do_enlarge(struct image *i, int screen_width, int screen_heig
 		return;
 have_sizes:
 		image = simple_resize(i->rgb, i->width, i->height, xsize, ysize);
-		if(i->alpha)
-			alpha = alpha_resize(i->alpha, i->width, i->height, xsize, ysize);
 
 		if(i->do_free)
 		{
-			free(i->alpha);
 			free(i->rgb);
 		}
 
 		i->rgb = image;
-		i->alpha = alpha;
 		i->do_free = 1;
 		i->width = xsize;
 		i->height = ysize;
@@ -183,7 +175,7 @@ static inline void do_fit_to_screen(struct image *i, int screen_width, int scree
 {
 	if((i->width > screen_width) || (i->height > screen_height))
 	{
-		unsigned char * new_image, * new_alpha = NULL;
+		unsigned char * new_image = NULL;
 		int nx_size = i->width, ny_size = i->height;
 
 		if(ignoreaspect)
@@ -220,30 +212,95 @@ static inline void do_fit_to_screen(struct image *i, int screen_width, int scree
 		else
 			new_image = simple_resize(i->rgb, i->width, i->height, nx_size, ny_size);
 
-		if(i->alpha)
-			new_alpha = alpha_resize(i->alpha, i->width, i->height, nx_size, ny_size);
-
 		if(i->do_free)
 		{
-			free(i->alpha);
 			free(i->rgb);
 		}
 
 		i->rgb = new_image;
-		i->alpha = new_alpha;
 		i->do_free = 1;
 		i->width = nx_size;
 		i->height = ny_size;
 	}
 }
 
+#define FARBFELD_MAGIC "farbfeld"
+#define FARBFELD_MAGIC_SIZE 8
+
+int get_ff_size(char *filename, int *x_out, int *y_out) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        return 1;
+    }
+
+    char magic[FARBFELD_MAGIC_SIZE];
+    if (fread(magic, 1, FARBFELD_MAGIC_SIZE, file) != FARBFELD_MAGIC_SIZE) {
+        perror("Failed to read magic number");
+        fclose(file);
+        return 2;
+    }
+
+    if (memcmp(magic, FARBFELD_MAGIC, FARBFELD_MAGIC_SIZE) != 0) {
+        printf("Not a farbfeld file\n");
+        fclose(file);
+        return 3;
+    }
+
+    uint32_t width, height;
+    if (fread(&width, sizeof(uint32_t), 1, file) != 1 ||
+        fread(&height, sizeof(uint32_t), 1, file) != 1) {
+        perror("Failed to read width and height");
+        fclose(file);
+        return 1;
+    }
+
+    // Convert width and height to host byte order
+    width = ntohl(width);
+    height = ntohl(height);
+
+    *x_out = (int) width;
+    *y_out = (int) height;
+
+    fclose(file);
+    return 0;
+}
+
+int load_ff(char *filename, uint8_t *rgb_out, int x, int y) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        return 1;
+    }
+
+    if (fseek(file, 8+4+4, SEEK_SET) != 0) {
+        fclose(file);
+        return 2;
+    }
+
+    size_t num_pixels = x * y;
+    uint16_t r,g,b,a;
+    for (size_t i = 0; i < num_pixels; i++) {
+        if (fread(&r, sizeof(uint16_t), 1, file) != 1 ||
+            fread(&g, sizeof(uint16_t), 1, file) != 1 ||
+            fread(&b, sizeof(uint16_t), 1, file) != 1 ||
+            fread(&a, sizeof(uint16_t), 1, file) != 1) {
+            fclose(file);
+            return 3;
+        }
+
+        // Convert pixel values to host byte order
+        rgb_out[i] = ntohs(r) >> 8;
+        rgb_out[i+1] = ntohs(g) >> 8;
+        rgb_out[i+2] = ntohs(b) >> 8;
+        // rgba_out[i+3] = ntohs(a) >> 8; // no alpha
+    }
+
+    fclose(file);
+    return 0;
+}
 
 int show_image(char *filename)
 {
-	int (*load)(char *, unsigned char *, unsigned char **, int, int);
-
-	unsigned char * image = NULL;
-	unsigned char * alpha = NULL;
+	uint8_t * image = NULL;
 
 	int c, ret;
 	int x_size, y_size, screen_width, screen_height;
@@ -259,57 +316,44 @@ int show_image(char *filename)
 
 	struct image i;
 
-#ifdef FBV_SUPPORT_PNG
-	if(fh_png_id(filename))
-	if(fh_png_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
-	{
-		load = fh_png_load;
-		goto identified;
-	}
-#endif
+    if (get_ff_size(filename, &x_size, &y_size) != 0) {
+    	printf("%s: Unable to access file or file format unknown.\n", filename);
+    	free(image);
+    	if(i.do_free)
+    	{
+    		free(i.rgb);
+    	}
+    }
 
-#ifdef FBV_SUPPORT_JPEG
-	if(fh_jpeg_id(filename))
-	if(fh_jpeg_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
+	if(!(image = (uint8_t*)malloc(x_size * y_size * 4)))
 	{
-		load = fh_jpeg_load;
-		goto identified;
-	}
-#endif
-
-#ifdef FBV_SUPPORT_BMP
-	if(fh_bmp_id(filename))
-	if(fh_bmp_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
-	{
-		load = fh_bmp_load;
-		goto identified;
-	}
-#endif
-	fprintf(stderr, "%s: Unable to access file or file format unknown.\n", filename);
-	return(1);
-
-identified:
-
-	if(!(image = (unsigned char*)malloc(x_size * y_size * 3)))
-	{
-		fprintf(stderr, "%s: Out of memory.\n", filename);
-		goto error;
+		printf("%s: Out of memory.\n", filename);
+    	free(image);
+    	if(i.do_free)
+    	{
+    		free(i.rgb);
+    	}
 	}
 
-	if(load(filename, image, &alpha, x_size, y_size) != FH_ERROR_OK)
+	if(load_ff(filename, image, x_size, y_size) != 0)
 	{
-		fprintf(stderr, "%s: Image data is corrupt?\n", filename);
-		goto error;
+		printf("%s: Image data is corrupt?\n", filename);
+    	free(image);
+    	if(i.do_free)
+    	{
+    		free(i.rgb);
+    	}
 	}
 
-	if(!opt_alpha)
-	{
-		free(alpha);
-		alpha = NULL;
+	if(getCurrentRes(&screen_width, &screen_height)) {
+    	free(image);
+    	if(i.do_free)
+    	{
+    		free(i.rgb);
+    	}
 	}
 
-	if(getCurrentRes(&screen_width, &screen_height))
-		goto error;
+
 	i.do_free = 0;
 
 	if (opt_smartfit>=0)
@@ -350,12 +394,10 @@ identified:
 			if(i.do_free)
 			{
 				free(i.rgb);
-				free(i.alpha);
 			}
 			i.width = x_size;
 			i.height = y_size;
 			i.rgb = image;
-			i.alpha = alpha;
 			i.do_free = 0;
 
 			if(transform_rotation)
@@ -393,7 +435,7 @@ identified:
 				fflush(stdout);
 			}
 			if(opt_image_info) {
-				printf("fbv - The Framebuffer Viewer\n");
+				printf("viewimage - The Framebuffer Image Viewer\n");
 				printf("%s\n", imagename ? imagename : filename);
 				printf("%d x %d\n", x_size, y_size);
 				printf(inline_status,
@@ -428,8 +470,13 @@ identified:
 			else
 				y_offs = 0;
 
-			if(fb_display(i.rgb, i.alpha, i.width, i.height, x_pan, y_pan, x_offs, y_offs))
-				goto error;
+			if(fb_display(i.rgb, i.width, i.height, x_pan, y_pan, x_offs, y_offs)) {
+            	free(image);
+            	if(i.do_free)
+            	{
+            		free(i.rgb);
+            	}
+			}
 			refresh = 0;
 		}
 		if(delay)
@@ -466,15 +513,35 @@ identified:
 				case EOF:
 				case 'q':
 					ret = 0;
-					goto done;
+                	if(opt_clear)
+                	{
+                		printf("\033[H\033[J");
+                		fflush(stdout);
+                	}
+                	return 0;
 				case ' ': case 10: case 13:
-					goto done;
+                	if(opt_clear)
+                	{
+                		printf("\033[H\033[J");
+                		fflush(stdout);
+                	}
+                	return 0;
 				case '>': case '.':
 					ret = 1;
-					goto done;
+                	if(opt_clear)
+                	{
+                		printf("\033[H\033[J");
+                		fflush(stdout);
+                	}
+                	return 0;
 				case '<': case ',':
 					ret = -1;
-					goto done;
+                	if(opt_clear)
+                	{
+                		printf("\033[H\033[J");
+                		fflush(stdout);
+                	}
+                	return 0;
 				case 'r':
 					refresh = 1;
 					break;
@@ -578,25 +645,14 @@ identified:
 		{
 			// Non-interactive, exit immediately
 			ret = 1;
-			break;
+        	if(opt_clear)
+        	{
+        		printf("\033[H\033[J");
+        		fflush(stdout);
+        	}
 		}
 	}// while(1)
 
-done:
-	if(opt_clear)
-	{
-		printf("\033[H\033[J");
-		fflush(stdout);
-	}
-
-error:
-	free(image);
-	free(alpha);
-	if(i.do_free)
-	{
-		free(i.rgb);
-		free(i.alpha);
-	}
 	return ret;
 }
 
@@ -605,7 +661,6 @@ void help(char *name)
 	printf("Usage: %s [options] image1 image2 image3 ...\n\n"
 		   "Available options:\n"
 		   "  -h, --help          Show this help\n"
-		   "  -a, --alpha         Use the alpha channel (if applicable)\n"
 		   "  -c, --dontclear     Do not clear the screen before and after displaying the image\n"
 		   "  -u, --donthide      Do not hide the cursor before and after displaying the image\n"
 		   "  -i, --noinfo        Supress image information\n"
@@ -657,7 +712,6 @@ int main(int argc, char **argv)
 	{
 		{"help",          no_argument,  0, 'h'},
 		{"noclear",       no_argument,  0, 'c'},
-		{"alpha",         no_argument,  0, 'a'},
 		{"unhide",        no_argument,  0, 'u'},
 		{"noinfo",        no_argument,  0, 'i'},
 		{"shrink",        no_argument,  0, 'f'},
@@ -680,7 +734,7 @@ int main(int argc, char **argv)
 	if(argc < 2)
 	{
 		help(argv[0]);
-		fprintf(stderr, "Error: Required argument missing.\n");
+		printf("Error: Required argument missing.\n");
 		return 1;
 	}
 
@@ -688,9 +742,6 @@ int main(int argc, char **argv)
 	{
 		switch(c)
 		{
-			case 'a':
-				opt_alpha = 1;
-				break;
 			case 'c':
 				opt_clear = 0;
 				break;
@@ -741,7 +792,7 @@ int main(int argc, char **argv)
 
 	if(!argv[optind])
 	{
-		fprintf(stderr, "Required argument missing! Consult %s -h.\n", argv[0]);
+		printf("Required argument missing! Consult %s -h.\n", argv[0]);
 		return 1;
 	}
 

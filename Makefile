@@ -1,17 +1,15 @@
 #
 # Makefile
 #
-# Makefile for fbv
+# Makefile for viewimage
 
-include Make.conf
+CC ?= clang
+CFLAGS ?= -Wall
 
-CC ?= g++
-CFLAGS ?= -Wall -D_GNU_SOURCE
-
-SOURCES	= main.c jpeg.c png.c bmp.c fb_display.c vt.c transforms.c
+SOURCES	= main.c fb_display.c vt.c transforms.c
 OBJECTS	= ${SOURCES:.c=.o}
 
-OUT	= fbv
+OUT	= viewimage
 
 all: $(OUT)
 	@echo Build DONE.
@@ -20,11 +18,7 @@ $(OUT): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $(OUT) $(OBJECTS) $(LIBS)
 
 clean:
-	rm -f $(OBJECTS) *~ $$$$~* *.bak core config.log $(OUT)
-
-distclean: clean
-	@echo -e "error:\n\t@echo Please run ./configure first..." >Make.conf
-	rm -f $(OUT) config.h
+	rm -f $(OBJECTS) $(OUT)
 
 install: $(OUT)
 	install -D $(OUT) $(bindir)
