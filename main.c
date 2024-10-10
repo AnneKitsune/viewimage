@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <getopt.h>
 #include <termios.h>
 #include <signal.h>
@@ -22,9 +23,12 @@ static int opt_image_info = 1;
 static int opt_shrink = 0;
 static int opt_widthonly = 0;
 static int opt_heightonly = 0;
+static int opt_smartfit = -1;
 static int opt_delay = 0;
 static int opt_enlarge = 0;
 static int opt_ignore_aspect = 0;
+static int opt_orientation = 0;
+static int opt_skip_tty = 0;
 static char *imagename = NULL;
 
 static char inline_status[] =
@@ -58,20 +62,27 @@ void setup_console(int t)
 	struct termios our_termios;
 	static struct termios old_termios;
 
-	if(t)
+	if (isatty(fileno(stdout)))
 	{
-		printf("setup console\n");
-		tcgetattr(0, &old_termios);
-		memcpy(&our_termios, &old_termios, sizeof(struct termios));
-		our_termios.c_lflag &= !(ECHO | ICANON);
-		tcsetattr(0, TCSANOW, &our_termios);
+		if(t)
+		{
+			printf("setup console\n");
+			tcgetattr(0, &old_termios);
+			memcpy(&our_termios, &old_termios, sizeof(struct termios));
+			our_termios.c_lflag &= !(ECHO | ICANON);
+			tcsetattr(0, TCSANOW, &our_termios);
+		}
+		else
+		{
+			//printf("restore console\n");
+			tcsetattr(0, TCSANOW, &old_termios);
+		}
 	}
 	else
 	{
-      //printf("restore console\n");
-		tcsetattr(0, TCSANOW, &old_termios);
+		printf("stdout is not connected to a terminal\n");
 	}
-}
+ }
 
 static inline void do_rotate(struct image *i, int rot)
 {
@@ -300,6 +311,38 @@ identified:
 	if(getCurrentRes(&screen_width, &screen_height))
 		goto error;
 	i.do_free = 0;
+
+	if (opt_smartfit>=0)
+	{
+		transform_shrink = 1;
+		transform_enlarge = 1;
+
+		// Check if screen aspect ratio is larger than image aspect ratio
+		// screen_width/screen_height > x_size/y_size
+		if (screen_width*y_size > x_size*screen_height)
+		{
+			if (opt_smartfit>100-100*x_size*screen_height/(y_size*screen_width))
+			{
+				transform_widthonly = 1;
+				transform_heightonly = 0;
+			}
+		}
+		else
+		{
+			if (opt_smartfit>100-100*y_size*screen_width/(x_size*screen_height))
+			{
+				transform_widthonly = 0;
+				transform_heightonly = 1;
+			}
+		}
+	}
+
+	if(opt_orientation)
+	{
+		transform_rotation = opt_orientation;
+	}
+
+
 	while(1)
 	{
 		if(retransform)
@@ -330,6 +373,19 @@ identified:
 				do_enlarge(&i, screen_width, screen_height, transform_iaspect, transform_widthonly, transform_heightonly);
 
 			x_pan = y_pan = 0;
+			if (opt_smartfit>=0)
+			{
+				if (i.width>screen_width)
+				{
+					x_pan = (i.width-screen_width)/2;
+				}
+
+				if (i.height>screen_height)
+				{
+					y_pan = (i.height-screen_height)/2;
+				}
+			}
+
 			refresh = 1; retransform = 0;
 			if(opt_clear)
 			{
@@ -355,7 +411,9 @@ identified:
 					closer[transform_iaspect],
 					1 / zoom
 				);
-				printf("\n%s", inline_help);
+
+				if (isatty(fileno(stdout)))
+					printf("\n%s", inline_help);
 			}
 		}
 		if(refresh && !noshow)
@@ -376,135 +434,151 @@ identified:
 		}
 		if(delay)
 		{
-			struct timeval tv;
-			fd_set fds;
-			tv.tv_sec = delay / 10;
-			tv.tv_usec = (delay % 10) * 100000;
-			FD_ZERO(&fds);
-			FD_SET(0, &fds);
-
-			if(select(1, &fds, NULL, NULL, &tv) <= 0)
+			if (isatty(fileno(stdin)))
 			{
+				struct timeval tv;
+				fd_set fds;
+				tv.tv_sec = delay / 10;
+				tv.tv_usec = (delay % 10) * 100000;
+				FD_ZERO(&fds);
+				FD_SET(0, &fds);
+				if(select(1, &fds, NULL, NULL, &tv) <= 0)
+					{
+						ret = 1;
+						break;
+					}
+				delay = 0;
+			}
+			else {
+				usleep(delay*100);
 				ret = 1;
 				break;
 			}
-			delay = 0;
 		}
 
-		c = getchar();
-		if (c == -1)
-			c = 'r';
-		switch(c)
+		if (isatty(fileno(stdin)) && !opt_skip_tty)
 		{
-			case EOF:
-			case 'q':
-				ret = 0;
-				goto done;
-			case ' ': case 10: case 13:
-				goto done;
-			case '>': case '.':
-				ret = 1;
-				goto done;
-			case '<': case ',':
-				ret = -1;
-				goto done;
-			case 'r':
-				refresh = 1;
-				break;
-			case 'a': case 'D':
-				if(x_pan == 0) break;
-				x_pan -= i.width / PAN_STEPPING;
-				if(x_pan < 0) x_pan = 0;
-				refresh = 1;
-				break;
-			case 'd': case 'C':
-				if(x_offs) break;
-				if(x_pan >= (i.width - screen_width)) break;
-				x_pan += i.width / PAN_STEPPING;
-				if(x_pan > (i.width - screen_width)) x_pan = i.width - screen_width;
-				refresh = 1;
-				break;
-			case 'w': case 'A':
-				if(y_pan == 0) break;
-				y_pan -= i.height / PAN_STEPPING;
-				if(y_pan < 0) y_pan = 0;
-				refresh = 1;
-				break;
-			case 'x': case 'B':
-				if(y_offs) break;
-				if(y_pan >= (i.height - screen_height)) break;
-				y_pan += i.height / PAN_STEPPING;
-				if(y_pan > (i.height - screen_height)) y_pan = i.height - screen_height;
-				refresh = 1;
-				break;
-			case 'f':
-				transform_shrink = !transform_shrink;
-				retransform = 1;
-				break;
-			case 'e':
-				transform_enlarge = !transform_enlarge;
-				retransform = 1;
-				break;
-			case 'l':
-				transform_widthonly = !transform_widthonly;
-				transform_heightonly = 0;
-				retransform = 1;
-				break;
-			case 't':
-				transform_widthonly = 0;
-				transform_heightonly = !transform_heightonly;
-				retransform = 1;
-				break;
-			case 'k':
-				transform_cal = !transform_cal;
-				retransform = 1;
-				break;
-			case 'i':
-				transform_iaspect = !transform_iaspect;
-				retransform = 1;
-				break;
-			case '0':
-			case '+':
-			case '-':
-				transform_cal = 0;
-				transform_iaspect = 0;
-				transform_enlarge = 0;
-				transform_shrink = 0;
-				transform_widthonly = 0;
-				transform_heightonly = 0;
-				zoom = c == '0' ? 1 : c == '+' ? zoom / 1.5 : zoom * 1.5;
-				retransform = 1;
-				break;
-			case 'p':
-				transform_cal = 0;
-				transform_iaspect = 0;
-				transform_enlarge = 0;
-				transform_shrink = 0;
-				transform_widthonly = 0;
-				transform_heightonly = 0;
-				zoom = 1;
-				retransform = 1;
-				break;
-			case 'n':
-				transform_rotation -= 1;
-				if(transform_rotation < 0)
-					transform_rotation += 4;
-				retransform = 1;
-				break;
-			case 'm':
-				transform_rotation += 1;
-				if(transform_rotation > 3)
-					transform_rotation -= 4;
-				retransform = 1;
-				break;
-			case 'h': case '\033':
-				if(c == '\033' && !noshow)
+			c = getchar();
+			if (c == -1)
+				c = 'r';
+			switch(c)
+			{
+				case EOF:
+				case 'q':
+					ret = 0;
+					goto done;
+				case ' ': case 10: case 13:
+					goto done;
+				case '>': case '.':
+					ret = 1;
+					goto done;
+				case '<': case ',':
+					ret = -1;
+					goto done;
+				case 'r':
+					refresh = 1;
 					break;
-				if(!opt_image_info)
+				case 'a': case 'D':
+					if(x_pan == 0) break;
+					x_pan -= i.width / PAN_STEPPING;
+					if(x_pan < 0) x_pan = 0;
+					refresh = 1;
 					break;
-				retransform = 1;
-				noshow = !noshow;
-				break;
+				case 'd': case 'C':
+					if(x_offs) break;
+					if(x_pan >= (i.width - screen_width)) break;
+					x_pan += i.width / PAN_STEPPING;
+					if(x_pan > (i.width - screen_width)) x_pan = i.width - screen_width;
+					refresh = 1;
+					break;
+				case 'w': case 'A':
+					if(y_pan == 0) break;
+					y_pan -= i.height / PAN_STEPPING;
+					if(y_pan < 0) y_pan = 0;
+					refresh = 1;
+					break;
+				case 'x': case 'B':
+					if(y_offs) break;
+					if(y_pan >= (i.height - screen_height)) break;
+					y_pan += i.height / PAN_STEPPING;
+					if(y_pan > (i.height - screen_height)) y_pan = i.height - screen_height;
+					refresh = 1;
+					break;
+				case 'f':
+					transform_shrink = !transform_shrink;
+					retransform = 1;
+					break;
+				case 'e':
+					transform_enlarge = !transform_enlarge;
+					retransform = 1;
+					break;
+				case 'l':
+					transform_widthonly = !transform_widthonly;
+					transform_heightonly = 0;
+					retransform = 1;
+					break;
+				case 't':
+					transform_widthonly = 0;
+					transform_heightonly = !transform_heightonly;
+					retransform = 1;
+					break;
+				case 'k':
+					transform_cal = !transform_cal;
+					retransform = 1;
+					break;
+				case 'i':
+					transform_iaspect = !transform_iaspect;
+					retransform = 1;
+					break;
+				case '0':
+				case '+':
+				case '-':
+					transform_cal = 0;
+					transform_iaspect = 0;
+					transform_enlarge = 0;
+					transform_shrink = 0;
+					transform_widthonly = 0;
+					transform_heightonly = 0;
+					zoom = c == '0' ? 1 : c == '+' ? zoom / 1.5 : zoom * 1.5;
+					retransform = 1;
+					break;
+				case 'p':
+					transform_cal = 0;
+					transform_iaspect = 0;
+					transform_enlarge = 0;
+					transform_shrink = 0;
+					transform_widthonly = 0;
+					transform_heightonly = 0;
+					zoom = 1;
+					retransform = 1;
+					break;
+				case 'n':
+					transform_rotation -= 1;
+					if(transform_rotation < 0)
+						transform_rotation += 4;
+					retransform = 1;
+					break;
+				case 'm':
+					transform_rotation += 1;
+					if(transform_rotation > 3)
+						transform_rotation -= 4;
+					retransform = 1;
+					break;
+				case 'h': case '\033':
+					if(c == '\033' && !noshow)
+						break;
+					if(!opt_image_info)
+						break;
+					retransform = 1;
+					noshow = !noshow;
+					break;
+			}
+		}
+		else
+		{
+			// Non-interactive, exit immediately
+			ret = 1;
+			break;
 		}
 	}// while(1)
 
@@ -540,9 +614,12 @@ void help(char *name)
 		   "  -e, --enlarge       Enlarge the image to fit the whole screen if necessary\n"
 		   "  -l, --widthonly     Fit the image horizontally\n"
 		   "  -t, --heightonly    Fit the image vertically\n"
+		   "  -x <percent>, --smartfit <percent>  Show image by covering the whole screen if less than <percent>%% is out of screen\n"
 		   "  -r, --ignore-aspect Ignore the image aspect while resizing\n"
 		   "  -s <delay>, --delay <d>  Slideshow, 'delay' is the slideshow delay in tenths of seconds.\n\n"
-		   "  -n imagename(s)     Image name(s) shown in help"
+		   "  -n imagename(s)     Image name(s) shown in help\n"
+		   "  -o <mode>, --orientation <mode>  Show image in specific orientation (0 = no rotation, 1 = 90° rotation, 2 = 180° rotation, 3 = 270° rotation)\n"
+		   "  -y, --skiptty		  Shows the image only once and skips tty input mode.\n"
 		   "Input keys:\n"
 		   " r          : Redraw the image\n"
 		   " < or ,     : Previous image\n"
@@ -589,7 +666,10 @@ int main(int argc, char **argv)
 		{"enlarge",       no_argument,  0, 'e'},
 		{"widthonly",     no_argument,  0, 'l'},
 		{"heightonly",    no_argument,  0, 't'},
+		{"smartfit",     required_argument,  0, 'x'},
 		{"ignore-aspect", no_argument,  0, 'r'},
+		{"orientation",		  required_argument,  0, 'o'},
+		{"skiptty",		  required_argument,  0, 'y'},
 		{"imagename",     required_argument, 0, 'n'},
 		{0, 0, 0, 0}
 	};
@@ -604,7 +684,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	while((c = getopt_long_only(argc, argv, "hn:cauifks:eltr", long_options, NULL)) != EOF)
+	while((c = getopt_long_only(argc, argv, "hn:cauifks:eltxro:y", long_options, NULL)) != EOF)
 	{
 		switch(c)
 		{
@@ -644,8 +724,17 @@ int main(int argc, char **argv)
 			case 't':
 				opt_heightonly = 1;
 				break;
+			case 'x':
+				opt_smartfit = atoi(optarg);
+				break;
 			case 'r':
 				opt_ignore_aspect = 1;
+				break;
+			case 'o':
+				opt_orientation = atoi(optarg);
+				break;
+			case 'y':
+				opt_skip_tty = 1;
 				break;
 		}
 	}
@@ -707,6 +796,10 @@ int main(int argc, char **argv)
 		printf("\033[?25h");
 		fflush(stdout);
 	}
+
+	if(opt_orientation && (opt_orientation > 3 || opt_orientation < 0))
+		opt_orientation = 0;
+
 	return 0;
 }
 

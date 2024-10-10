@@ -73,6 +73,19 @@ int fb_display(unsigned char *rgbbuff, unsigned char * alpha,
 	if(x_offs + x_size > x_stride) x_offs = 0;
 	if(y_offs + y_size > var.yres) y_offs = 0;
 
+	/* Check if not whole screen is covered */
+	if(x_offs || y_offs)
+	{
+		unsigned char *fb;
+		int i;
+		fb = (unsigned char*)mmap(NULL, fix.line_length * var.yres_virtual, PROT_WRITE | PROT_READ, MAP_SHARED, fh, 0);
+
+		for(i = 0; i <  fix.line_length * var.yres_virtual; i++)
+		{
+			fb[i]=0;
+		}
+	}
+
 	/* blit buffer 2 fb */
 	fbbuff = (unsigned char*)convertRGB2FB(fh, rgbbuff, x_size * y_size, var.bits_per_pixel, &bp);
 #if 0
@@ -336,6 +349,16 @@ void* convertRGB2FB(int fh, unsigned char *rgbbuff, unsigned long count, int bpp
 		fbbuff = (void *) s_fbbuff;
 		break;
 	case 24:
+	    *cpp = 3;
+	    c_fbbuff = (unsigned char *) malloc(count * 3 * sizeof(unsigned char));
+	    for(i = 0; i < (3 * count); i += 3) {
+		/* Big endian framebuffer. */
+		c_fbbuff[i] = rgbbuff[i+2];
+		c_fbbuff[i+1] = rgbbuff[i+1];
+		c_fbbuff[i+2] = rgbbuff[i];
+	    }
+	    fbbuff = (void *) c_fbbuff;
+	    break;
 	case 32:
 		*cpp = 4;
 		i_fbbuff = (unsigned int *) malloc(count * sizeof(unsigned int));
